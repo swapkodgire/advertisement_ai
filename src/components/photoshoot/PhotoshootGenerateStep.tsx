@@ -157,6 +157,73 @@ interface PipelineSession {
  */
 const OUTPUT_STEP_IDS = ["upscale", "remove_bg", "ai_backgrounds", "ai_edit"];
 
+const QUICK_FLOW_STEPS = [
+  { id: "brief", label: "AI brief", sub: "LLM prompt" },
+  { id: "generate", label: "AI generate", sub: "Single-shot scene" },
+  { id: "finish", label: "Finish & export", sub: "Polish + platform size" },
+] as const;
+
+type QuickFlowPhase = "idle" | "brief" | "generate" | "finish" | "done";
+
+/** Compact minimal rail shown in Standard (quick) mode. */
+function QuickFlowRail({
+  phase,
+}: {
+  phase: QuickFlowPhase;
+}) {
+  const phaseOrder: QuickFlowPhase[] = ["brief", "generate", "finish"];
+  const activeIdx = phase === "done" ? 3 : Math.max(0, phaseOrder.indexOf(phase));
+
+  return (
+    <div className="flex items-stretch gap-2">
+      {QUICK_FLOW_STEPS.map((step, i) => {
+        const done = phase === "done" || i < activeIdx;
+        const active = phase !== "done" && phaseOrder[activeIdx] === step.id;
+        return (
+          <div key={step.id} className="flex flex-1 items-center gap-2">
+            <div
+              className={cn(
+                "flex flex-1 items-center gap-2.5 rounded-xl border px-3 py-2.5 transition-all",
+                active
+                  ? "border-accent/40 bg-accent/5"
+                  : done
+                    ? "border-[var(--success)]/30 bg-[var(--success-bg)]/40"
+                    : "border-border/40 bg-white/40"
+              )}
+            >
+              <span
+                className={cn(
+                  "flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold",
+                  active
+                    ? "bg-accent text-white shadow-md shadow-accent/30"
+                    : done
+                      ? "bg-[var(--success-bg)] text-[var(--success)]"
+                      : "bg-white/70 text-muted"
+                )}
+              >
+                {active ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : done ? (
+                  <Check className="h-3.5 w-3.5" />
+                ) : (
+                  i + 1
+                )}
+              </span>
+              <div className="min-w-0">
+                <p className="truncate text-[11px] font-semibold leading-tight">{step.label}</p>
+                <p className="truncate text-[9px] text-muted">{step.sub}</p>
+              </div>
+            </div>
+            {i < QUICK_FLOW_STEPS.length - 1 && (
+              <span className="hidden h-0.5 w-4 shrink-0 rounded bg-border/50 sm:block" />
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function initTenStepPipeline(activeOrder = 0): PipelineStepState[] {
   return PHOTOSHOOT_PIPELINE_STEPS.map((s) => ({
     id: s.id,
@@ -226,6 +293,7 @@ export function PhotoshootGenerateStep({
   const [regeneratingPhase, setRegeneratingPhase] = useState<RegeneratePhase | null>(null);
   const [compositeStale, setCompositeStale] = useState(false);
   const [pipelineMode, setPipelineMode] = useState<PipelineMode>("standard");
+  const [quickFlowPhase, setQuickFlowPhase] = useState<QuickFlowPhase>("idle");
   const [isolationMethod, setIsolationMethod] = useState<string | null>(null);
   const [compositeMethod, setCompositeMethod] = useState<string | null>(null);
   const [showFinalModal, setShowFinalModal] = useState(false);
@@ -509,8 +577,16 @@ export function PhotoshootGenerateStep({
 
       if (data.agentPlan) onAgentPlanUpdate(data.agentPlan);
       if (data.prompts) setPrompts(data.prompts);
+
+      if (pipelineMode === "standard") {
+        if (data.phase === "compose_start") setQuickFlowPhase("brief");
+        else if (data.phase === "compose_done") setQuickFlowPhase("generate");
+        else if (data.phase === "composite_start") setQuickFlowPhase("generate");
+        else if (data.phase === "finish_start") setQuickFlowPhase("finish");
+        else if (data.phase === "complete") setQuickFlowPhase("done");
+      }
     },
-    [applyPreviewFromProgress, onAgentPlanUpdate, updateTenStepPipeline]
+    [applyPreviewFromProgress, onAgentPlanUpdate, updateTenStepPipeline, pipelineMode]
   );
 
   const processStream = async (res: Response, mode: "full" | RegeneratePhase) => {
@@ -621,8 +697,12 @@ export function PhotoshootGenerateStep({
     setFinalPreview(null);
     setCompositeStale(false);
     setActivityLog([]);
-    setPipeline(initPipelineForGeneration());
-    setPromptView("upscale");
+    if (pipelineMode === "pro") {
+      setPipeline(initPipelineForGeneration());
+      setPromptView("upscale");
+    } else {
+      setQuickFlowPhase("brief");
+    }
 
     pushLog(`Starting ${pipelineMode === "pro" ? "Pro" : "Standard"} pipeline…`);
 
@@ -832,7 +912,11 @@ export function PhotoshootGenerateStep({
               </div>
               <PrimaryButton
                 onClick={handleGenerate}
-                disabled={busy || planLoading || !canGenerate || !agentPlan}
+                disabled={
+                  busy ||
+                  !canGenerate ||
+                  (pipelineMode === "pro" && (planLoading || !agentPlan))
+                }
                 className="justify-center py-3 text-sm shadow-lg shadow-accent/20"
               >
                 {generating ? (
@@ -916,7 +1000,7 @@ export function PhotoshootGenerateStep({
           {pipelineMode === "pro" ? (
             <StepRail pipeline={pipeline} selectedId={promptView} onSelect={setPromptView} />
           ) : (
-            <QuickFlowRail generating={generating} ready={Boolean(agentPlan)} />
+            <QuickFlowRail phase={quickFlowPhase} />
           )}
         </div>
       </div>
@@ -1395,64 +1479,6 @@ function FinalDesignModal({
           </button>
         </div>
       </div>
-    </div>
-  );
-}
-
-const QUICK_FLOW_STEPS = [
-  { id: "brief", label: "AI brief", sub: "LLM prompt" },
-  { id: "generate", label: "AI generate", sub: "Single-shot scene" },
-  { id: "finish", label: "Finish & export", sub: "Polish + platform size" },
-] as const;
-
-/** Compact minimal rail shown in Standard (quick) mode. */
-function QuickFlowRail({ generating, ready }: { generating: boolean; ready: boolean }) {
-  return (
-    <div className="flex items-stretch gap-2">
-      {QUICK_FLOW_STEPS.map((step, i) => {
-        const done = ready && !generating;
-        const active = generating;
-        return (
-          <div key={step.id} className="flex flex-1 items-center gap-2">
-            <div
-              className={cn(
-                "flex flex-1 items-center gap-2.5 rounded-xl border px-3 py-2.5 transition-all",
-                active
-                  ? "border-accent/40 bg-accent/5"
-                  : done
-                    ? "border-[var(--success)]/30 bg-[var(--success-bg)]/40"
-                    : "border-border/40 bg-white/40"
-              )}
-            >
-              <span
-                className={cn(
-                  "flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold",
-                  active
-                    ? "bg-accent text-white shadow-md shadow-accent/30"
-                    : done
-                      ? "bg-[var(--success-bg)] text-[var(--success)]"
-                      : "bg-white/70 text-muted"
-                )}
-              >
-                {active ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                ) : done ? (
-                  <Check className="h-3.5 w-3.5" />
-                ) : (
-                  i + 1
-                )}
-              </span>
-              <div className="min-w-0">
-                <p className="truncate text-[11px] font-semibold leading-tight">{step.label}</p>
-                <p className="truncate text-[9px] text-muted">{step.sub}</p>
-              </div>
-            </div>
-            {i < QUICK_FLOW_STEPS.length - 1 && (
-              <span className="hidden h-0.5 w-4 shrink-0 rounded bg-border/50 sm:block" />
-            )}
-          </div>
-        );
-      })}
     </div>
   );
 }

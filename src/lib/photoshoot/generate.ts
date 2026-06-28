@@ -13,7 +13,7 @@ import {
 import {
   runAICompositePass,
   buildProModePrompt,
-  runProModeGeneration,
+  runStandardQuickGeneration,
   type AICompositeMethod,
 } from "@/lib/image/ai-composite";
 import { applyFinishPipeline } from "@/lib/image/finish-pipeline";
@@ -784,6 +784,8 @@ export async function runRegeneratePhase(
  * STANDARD mode — quick generation. Relies mostly on the LLM image model: one unified
  * Cursor pass turns the source product into a fully-realized scene with integrated
  * lighting, then a light studio finish + export. Minimum steps, fastest path.
+ * Falls back to a lightweight 3-step composite (isolate → scene → composite) if the
+ * single-shot Cursor call fails.
  */
 export async function runStandardQuickPhotoshoot(input: PhotoshootGenerationInput) {
   assertCursorConfigured();
@@ -792,51 +794,27 @@ export async function runStandardQuickPhotoshoot(input: PhotoshootGenerationInpu
   const genId = randomUUID();
   const emit = input.onProgress;
   const exportSize = exportDimensions(platform.resolution);
+  const genSize = generationDimensions(platform.aspectRatio);
 
   emit?.({
     phase: "compose_start",
-    message: "Standard — composing quick scene prompt…",
-    detail: "Cursor AI unified scene transform (integrated lighting)",
+    message: "Standard — building quick scene prompt…",
+    detail: "Template brief + platform framing rules",
   });
 
-  const { agentPlan, rulesPrompts } = await composePromptBundle(input, platform, view, scene);
-
-  emit?.({
-    phase: "compose_done",
-    message: "Quick prompts ready",
-    agentPlan,
-    prompts: {
-      isolationPrompt: agentPlan.isolationPrompt ?? rulesPrompts.isolationPrompt,
-      sceneBackgroundPrompt: rulesPrompts.sceneBackgroundPrompt,
-      sceneImagePrompt: rulesPrompts.sceneImagePrompt,
-      compositePrompt: rulesPrompts.compositePrompt,
-      negativePrompt: rulesPrompts.negativePrompt,
-      creativeBrief: agentPlan.creativeBrief ?? rulesPrompts.creativeBrief,
-      fullPrompt: agentPlan.imageEditPrompt,
-    },
+  // Fast template prompts — skip the heavy 10-step agent compose used by Pro.
+  const rulesPrompts = buildPhotoshootPrompts({
+    brandName: input.brandName,
+    productName: input.productName || "Product",
+    productCategory: input.productCategory || "General",
+    productDescription: input.productDescription || "",
+    businessDNA: input.businessDNA,
+    platformPostTypeId: input.platformPostTypeId,
+    viewId: input.viewId,
+    sceneId: input.sceneId,
   });
 
-  const originalPath = await findOriginalImagePath(input.brandId, input.productId);
-  const rawDir = getRawDir(input.brandId, input.productId);
-  const enhancedPath = path.join(rawDir, ENHANCED_SOURCE_FILENAME);
-
-  try {
-    await enhanceSourceToFile(originalPath, enhancedPath);
-  } catch {
-    // use original
-  }
-
-  const sourceForPro = (await fs.access(enhancedPath).then(() => true).catch(() => false))
-    ? enhancedPath
-    : originalPath;
-
-  emit?.({
-    phase: "composite_start",
-    message: "Standard — Cursor generating integrated scene…",
-    detail: "Single quick Cursor AI pass: product in scene with lighting & shadows",
-  });
-
-  const proPrompt = buildProModePrompt({
+  const quickPrompt = buildProModePrompt({
     sceneName: scene.sceneName,
     sceneDescription: scene.sceneDescription,
     lighting: scene.lighting,
@@ -853,29 +831,109 @@ export async function runStandardQuickPhotoshoot(input: PhotoshootGenerationInpu
     viewName: view.viewName,
   });
 
+  emit?.({
+    phase: "compose_done",
+    message: "Quick prompts ready",
+    prompts: {
+      isolationPrompt: rulesPrompts.isolationPrompt,
+      sceneBackgroundPrompt: rulesPrompts.sceneBackgroundPrompt,
+      sceneImagePrompt: rulesPrompts.sceneImagePrompt,
+      compositePrompt: quickPrompt,
+      negativePrompt: rulesPrompts.negativePrompt,
+      creativeBrief: rulesPrompts.creativeBrief,
+      fullPrompt: quickPrompt,
+    },
+  });
+
+  const originalPath = await findOriginalImagePath(input.brandId, input.productId);
+  const rawDir = getRawDir(input.brandId, input.productId);
+  const enhancedPath = path.join(rawDir, ENHANCED_SOURCE_FILENAME);
+
+  try {
+    await enhanceSourceToFile(originalPath, enhancedPath);
+  } catch {
+    // use original
+  }
+
+  const sourceForQuick = (await fs.access(enhancedPath).then(() => true).catch(() => false))
+    ? enhancedPath
+    : originalPath;
+
+  emit?.({
+    phase: "composite_start",
+    message: "Standard — Cursor generating integrated scene…",
+    detail: "Single quick Cursor AI pass: product in scene with lighting & shadows",
+  });
+
   const genDir = getGeneratedDir(input.brandId, input.productId);
   const filename = `${genId}.png`;
-  const proRawPath = path.join(genDir, `${genId}-pro-raw.png`);
+  const quickRawPath = path.join(genDir, `${genId}-quick-raw.png`);
 
-  const genSize = generationDimensions(platform.aspectRatio);
-
-  const proResult = await runProModeGeneration({
-    sourcePath: sourceForPro,
-    outputPath: proRawPath,
-    prompt: proPrompt,
+  let quickResult = await runStandardQuickGeneration({
+    sourcePath: sourceForQuick,
+    outputPath: quickRawPath,
+    prompt: quickPrompt,
     aspectRatio: platform.aspectRatio,
     width: genSize.width,
     height: genSize.height,
   });
 
+  // Single-shot failed — fall back to lightweight deterministic composite.
+  if (!quickResult) {
+    emit?.({
+      phase: "composite_start",
+      message: "Standard — falling back to studio composite…",
+      detail: "Cursor single-shot unavailable — isolate → scene → composite",
+    });
+
+    const sourceBuffer = await fs.readFile(originalPath);
+    const { isolationMethod, productLayerPath } = await executeIsolatePhase(
+      input.brandId,
+      input.productId,
+      emit,
+      input.productCategory
+    );
+
+    const { agentPlan, rulesPrompts: fbRules, sceneBackgroundPrompt, sceneImagePrompt } =
+      await composePromptBundle(input, platform, view, scene);
+
+    const sceneResult = await executeScenePhase({
+      brandId: input.brandId,
+      productId: input.productId,
+      genId,
+      sceneImagePrompt,
+      platform,
+      scene,
+      sourceBuffer,
+      emit,
+    });
+
+    return executeCompositePhase({
+      input,
+      genId,
+      sceneBgFilename: sceneResult.sceneBgFilename,
+      productLayerPath,
+      platform,
+      view,
+      scene,
+      agentPlan,
+      rulesPrompts: fbRules,
+      sceneBackgroundPrompt,
+      sceneImagePrompt,
+      isolationMethod,
+      sceneMethod: sceneResult.sceneMethod,
+      emit,
+    });
+  }
+
   emit?.({
     phase: "finish_start",
     message: "Applying quick finish…",
-    detail: `Quick output via ${proResult.method}`,
-    method: proResult.method,
+    detail: `Quick output via ${quickResult.method}`,
+    method: quickResult.method,
   });
 
-  const finished = await applyFinishPipeline(proResult.buffer, {
+  const finished = await applyFinishPipeline(quickResult.buffer, {
     targetWidth: exportSize.width,
     targetHeight: exportSize.height,
     aspectRatio: platform.aspectRatio,
@@ -901,11 +959,11 @@ export async function runStandardQuickPhotoshoot(input: PhotoshootGenerationInpu
     viewId: input.viewId,
     sceneId: input.sceneId,
     filename,
-    prompt: proPrompt,
-    creativeBrief: agentPlan.creativeBrief,
+    prompt: quickPrompt,
+    creativeBrief: rulesPrompts.creativeBrief,
     pipeline: "standard-quick",
     pipelineMode: "standard" as PipelineMode,
-    compositeMethod: proResult.method,
+    compositeMethod: quickResult.method,
     imageModel: getCursorImageModelLabel(),
     resolution: platform.resolution,
     aspectRatio: platform.aspectRatio,
@@ -916,21 +974,21 @@ export async function runStandardQuickPhotoshoot(input: PhotoshootGenerationInpu
   emit?.({
     phase: "complete",
     message: "Standard photoshoot complete",
-    detail: `Integrated scene via ${proResult.method}`,
+    detail: `Integrated scene via ${quickResult.method}`,
     previewUrl: url,
-    method: proResult.method,
+    method: quickResult.method,
   });
 
   return {
     id: genId,
     url,
     meta,
-    agentPlan,
+    agentPlan: null,
     usedAI: true,
-    method: proResult.method,
-    message: `Standard complete — ${proResult.method}`,
+    method: quickResult.method,
+    message: `Standard complete — ${quickResult.method}`,
     sceneBgFilename: undefined,
-    compositeMethod: proResult.method,
+    compositeMethod: quickResult.method,
   };
 }
 

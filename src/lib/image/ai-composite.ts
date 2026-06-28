@@ -7,7 +7,7 @@ import {
   compositeProductOnScene,
   type CompositePlacementResult,
 } from "@/lib/image/process-product";
-import { generationDimensions } from "@/lib/image/image-dimensions";
+import { aspectRatioHint, generationDimensions } from "@/lib/image/image-dimensions";
 import type { SceneCategory } from "@/types";
 
 export type AICompositeMethod = "cursor-ai" | "sharp";
@@ -46,6 +46,79 @@ async function conformToPlatformSizeOrReject(
   if (srcW === width && srcH === height) return buffer;
   return sharp(buffer)
     .resize(width, height, { fit: "fill", kernel: sharp.kernel.lanczos3 })
+    .png({ quality: 95 })
+    .toBuffer();
+}
+
+/** Sample a neutral background color from image corners for letterboxing. */
+async function sampleEdgeBackgroundColor(buffer: Buffer): Promise<{ r: number; g: number; b: number }> {
+  try {
+    const meta = await sharp(buffer).metadata();
+    const w = meta.width ?? 100;
+    const h = meta.height ?? 100;
+    const sample = 8;
+    const regions = [
+      { left: 0, top: 0 },
+      { left: Math.max(0, w - sample), top: 0 },
+      { left: 0, top: Math.max(0, h - sample) },
+      { left: Math.max(0, w - sample), top: Math.max(0, h - sample) },
+    ];
+    let r = 0;
+    let g = 0;
+    let b = 0;
+    let n = 0;
+    for (const region of regions) {
+      const { data } = await sharp(buffer)
+        .extract({ left: region.left, top: region.top, width: Math.min(sample, w), height: Math.min(sample, h) })
+        .raw()
+        .toBuffer({ resolveWithObject: true });
+      for (let i = 0; i < data.length; i += 3) {
+        r += data[i];
+        g += data[i + 1];
+        b += data[i + 2];
+        n++;
+      }
+    }
+    if (n === 0) return { r: 240, g: 240, b: 240 };
+    return { r: Math.round(r / n), g: Math.round(g / n), b: Math.round(b / n) };
+  } catch {
+    return { r: 240, g: 240, b: 240 };
+  }
+}
+
+/**
+ * Standard quick mode: fit the full AI image inside the platform canvas and pad with a
+ * solid edge-sampled color — never crop the product and never blur-fill (which ghosts it).
+ */
+async function conformStandardQuickOutput(
+  buffer: Buffer,
+  width: number,
+  height: number
+): Promise<Buffer> {
+  const exact = await conformToPlatformSizeOrReject(buffer, width, height);
+  if (exact) return exact;
+
+  const fitted = await sharp(buffer)
+    .resize(width, height, { fit: "inside", kernel: sharp.kernel.lanczos3 })
+    .png()
+    .toBuffer();
+  const fittedMeta = await sharp(fitted).metadata();
+  const fw = fittedMeta.width ?? width;
+  const fh = fittedMeta.height ?? height;
+  const padLeft = Math.floor((width - fw) / 2);
+  const padRight = width - fw - padLeft;
+  const padTop = Math.floor((height - fh) / 2);
+  const padBottom = height - fh - padTop;
+  const bg = await sampleEdgeBackgroundColor(buffer);
+
+  return sharp(fitted)
+    .extend({
+      top: padTop,
+      bottom: padBottom,
+      left: padLeft,
+      right: padRight,
+      background: bg,
+    })
     .png({ quality: 95 })
     .toBuffer();
 }
@@ -228,4 +301,71 @@ export async function runProModeGeneration(options: {
   }
 
   throw lastError ?? new Error("Cursor Pro mode generation failed");
+}
+
+export type StandardQuickMethod = "cursor-quick" | "cursor-quick-fit";
+
+/**
+ * Standard mode — single-shot Cursor transform with tolerant aspect handling.
+ * Never throws on aspect mismatch; pads with edge color instead. Returns null only when
+ * Cursor produces no image at all (caller should run deterministic fallback).
+ */
+export async function runStandardQuickGeneration(options: {
+  sourcePath: string;
+  outputPath: string;
+  prompt: string;
+  aspectRatio: string;
+  width?: number;
+  height?: number;
+}): Promise<{ buffer: Buffer; method: StandardQuickMethod } | null> {
+  if (!isCursorConfigured()) {
+    throw new Error("CURSOR_API_KEY is required. Add it to .env.local");
+  }
+
+  const genSize =
+    options.width && options.height
+      ? { width: options.width, height: options.height }
+      : generationDimensions(options.aspectRatio);
+
+  const dimHint = aspectRatioHint(options.aspectRatio, genSize.width, genSize.height);
+  const fullPrompt = `${options.prompt}\n\n${dimHint}`;
+
+  let lastError: Error | null = null;
+  for (let attempt = 1; attempt <= CURSOR_COMPOSITE_ATTEMPTS + 1; attempt++) {
+    try {
+      const { buffer } = await compositeWithCursorAI({
+        productPath: options.sourcePath,
+        backgroundPath: options.sourcePath,
+        draftCompositePath: options.sourcePath,
+        outputAbsolutePath: options.outputPath,
+        prompt: fullPrompt,
+        width: genSize.width,
+        height: genSize.height,
+        singleImageMode: true,
+        aspectRatio: options.aspectRatio,
+      });
+
+      const exact = await conformToPlatformSizeOrReject(buffer, genSize.width, genSize.height);
+      if (exact) {
+        await fs.writeFile(options.outputPath, exact);
+        return { buffer: exact, method: "cursor-quick" };
+      }
+
+      const fitted = await conformStandardQuickOutput(buffer, genSize.width, genSize.height);
+      await fs.writeFile(options.outputPath, fitted);
+      return { buffer: fitted, method: "cursor-quick-fit" };
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+      console.warn(
+        `Standard quick attempt ${attempt}/${CURSOR_COMPOSITE_ATTEMPTS + 1} failed:`,
+        err
+      );
+      if (attempt <= CURSOR_COMPOSITE_ATTEMPTS) {
+        await new Promise((r) => setTimeout(r, 2000 * attempt));
+      }
+    }
+  }
+
+  if (lastError) console.warn("Standard quick generation exhausted retries:", lastError.message);
+  return null;
 }

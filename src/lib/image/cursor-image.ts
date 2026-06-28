@@ -351,13 +351,21 @@ export async function compositeWithCursorAI(options: {
   width: number;
   height: number;
   singleImageMode?: boolean;
+  aspectRatio?: string;
 }): Promise<{ buffer: Buffer }> {
   const imagePaths = options.singleImageMode
     ? [options.productPath]
     : [options.productPath, options.backgroundPath, options.draftCompositePath];
 
+  const aspectHint = options.aspectRatio
+    ? `\n${aspectRatioHint(options.aspectRatio, options.width, options.height)}`
+    : "";
+
   const instruction = options.singleImageMode
-    ? "Transform the attached product photo into a professional marketing image per the prompt. Preserve the product identity exactly."
+    ? `Transform the attached product photo into a professional marketing image per the prompt.
+Preserve the product identity exactly — same shape, color, logos, materials.
+The ENTIRE product must remain fully visible inside the frame with safe margins on all four sides.
+Output must match the requested aspect ratio and dimensions.${aspectHint}`
     : `You are given reference images:
 1) ISOLATED PRODUCT (transparent cutout) — preserve product identity exactly
 2) EMPTY SCENE BACKGROUND — environment plate with ground/surface in lower portion
