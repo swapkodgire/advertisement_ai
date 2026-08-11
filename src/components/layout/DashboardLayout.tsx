@@ -14,6 +14,7 @@ import {
   User,
 } from "lucide-react";
 import { BrandSwitcher } from "@/components/brand/BrandSwitcher";
+import { StaticDemoBanner } from "@/components/layout/StaticDemoBanner";
 import { cn } from "@/lib/utils";
 
 const NAV_ITEMS = [
@@ -150,6 +151,7 @@ export function DashboardLayout({ children }: { children: React.ReactNode }) {
     <div className="app-canvas flex h-screen overflow-hidden">
       <Sidebar />
       <div className="relative z-10 flex flex-1 flex-col overflow-hidden">
+        <StaticDemoBanner />
         <TopBar />
         <main className="flex-1 overflow-y-auto">{children}</main>
       </div>

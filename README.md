@@ -79,6 +79,16 @@ npm run dev
 
 Open [http://localhost:3000](http://localhost:3000) — redirects to Business DNA Overview.
 
+## Live demo (GitHub Pages)
+
+Static UI demo: **https://swapkodgire.github.io/advertisement_ai/**
+
+Browse brands, Business DNA, catalog, campaigns, photoshoot pickers, and docs. AI upload/generate/chat are disabled on Pages (static hosting only) — use `npm run dev` locally for the full pipeline.
+
+```bash
+npm run build:pages   # writes static site to out/
+```
+
 ## Project Structure
 
 ```
