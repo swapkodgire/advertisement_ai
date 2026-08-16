@@ -10,6 +10,8 @@ The app uses `@cursor/sdk` server-side for:
 
 - **Ad AI Agent chat** — `/api/agent/chat` (SSE streaming)
 - **Photoshoot / Campaign briefs** — `/api/generate/assets`
+- **Photoshoot planning & image generation** — see [Where Agents Live](./agents.md)
+- **Publish captions & hashtags** — `/api/publish/content`
 - **Key verification** — `/api/cursor/status`
 
 Configure in `.env.local`:

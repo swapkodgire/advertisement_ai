@@ -20,7 +20,8 @@ docs/
 │   └── facebook.md
 └── architecture/            # Tool design & integration
     ├── business-dna-tool.md
-    └── ai-integration.md
+    ├── ai-integration.md
+    └── agents.md            # Where Cursor agents live in code
 ```
 
 ## Quick Links
@@ -31,6 +32,14 @@ docs/
 | Google | [brand-showcase/google](./brand-showcase/google.md) | [product-showcase/google](./product-showcase/google.md) |
 | AI Search (ChatGPT, Claude, Gemini) | [brand-showcase/ai-agentic-search](./brand-showcase/ai-agentic-search.md) | [product-showcase/ai-agentic-search](./product-showcase/ai-agentic-search.md) |
 | Facebook | [brand-showcase/facebook](./brand-showcase/facebook.md) | [product-showcase/facebook](./product-showcase/facebook.md) |
+
+## Architecture
+
+| Guide | Description |
+|-------|-------------|
+| [architecture/agents](./architecture/agents.md) | Where Cursor agents live in the codebase (chat, photoshoot, image, publish) |
+| [architecture/ai-integration](./architecture/ai-integration.md) | API keys, models, and integration patterns |
+| [architecture/business-dna-tool](./architecture/business-dna-tool.md) | Business DNA data model and UI |
 
 ## Using This Documentation
 
